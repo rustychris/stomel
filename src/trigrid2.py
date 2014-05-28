@@ -1751,7 +1751,6 @@ class TriGrid(object):
 
     def build_index(self):
         if self.index is None:
-            # self.index = stree.STree(self.points[:,:2])
             # assemble points into list of (id, [x x y y], None)
             if self.verbose > 1:
                 print "building point index"

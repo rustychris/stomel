@@ -30,12 +30,8 @@ try:
 except ImportError:
     cm = None
     
-# load both types of indices, so we can choose per-field
-# which one to use
-import stree
 from safe_rtree import Rtree
 xxyy = array([0,0,1,1])
-# xyxy = array([0,1,0,1])
 
 from linestring_utils import upsample_linearring
 
@@ -388,62 +384,56 @@ class XYZField(Field):
         return newF
 
     def build_index(self,index_type='rtree'):
-        # print "Building spatial index"
-        if index_type == 'stree':
-            self.index = stree.STree(self.X)
-            self.index_type = 'stree'
-        else:
-            self.index_type = 'rtree'
-            if self.X.shape[0] > 0:
-                # the easy way:
-                # tuples = [(i,self.X[i,xxyy],None) for i in range(self.X.shape[0])]
+        if index_type != 'rtree':
+            print "Ignoring request for non-rtree index"
+            
+        if self.X.shape[0] > 0:
+            # the easy way:
+            # tuples = [(i,self.X[i,xxyy],None) for i in range(self.X.shape[0])]
 
-                # but this way we get some feedback
-                def gimme():
-                    i = gimme.i
-                    if i < self.X.shape[0]:
-                        if i %10000 == 0 and i>0:
-                            print "building index: %d  -  %.2f%%"%(i, 100.0 * i / self.X.shape[0] )
-                        gimme.i = i+1
-                        return (i,self.X[i,xxyy],None)
-                    else:
-                        return None
-                gimme.i = 0
-
-                tuples = iter(gimme,None)
-
-                # If we can build the index on disk, go for it...
-                index_fname = self.index_fname()
-                if index_fname is not None:
-                    # See if the index is as new as the .bin file
-
-                    index_exists = os.path.exists(index_fname+".dat")
-                    if index_exists:
-                        index_mtime = os.stat(index_fname+".dat").st_mtime
-                        bin_mtime = os.stat(self.from_file).st_mtime
-
-                        if index_mtime < bin_mtime:
-                            print "Index is too old"
-                            os.unlink(index_fname+".dat")
-                            os.unlink(index_fname+".idx")
-                            index_exists = False
-
-                    if not index_exists:
-                        print "trying to build on-disk index in %s"%index_fname
-                        tmp_index = Rtree(index_fname,tuples,interleaved=False)
-                        # weird, but we have to delete it to actually force the
-                        # data to be written out
-                        del tmp_index
-
-                    # Then open it again for read
-                    self.index = Rtree(index_fname,interleaved=False)
+            # but this way we get some feedback
+            def gimme():
+                i = gimme.i
+                if i < self.X.shape[0]:
+                    if i %10000 == 0 and i>0:
+                        print "building index: %d  -  %.2f%%"%(i, 100.0 * i / self.X.shape[0] )
+                    gimme.i = i+1
+                    return (i,self.X[i,xxyy],None)
                 else:
-                    #print "just building Rtree index in memory"
-                    self.index = Rtree(tuples,interleaved=False)
+                    return None
+            gimme.i = 0
+
+            tuples = iter(gimme,None)
+
+            # If we can build the index on disk, go for it...
+            index_fname = self.index_fname()
+            if index_fname is not None:
+                # See if the index is as new as the .bin file
+                index_exists = os.path.exists(index_fname+".dat")
+                if index_exists:
+                    index_mtime = os.stat(index_fname+".dat").st_mtime
+                    bin_mtime = os.stat(self.from_file).st_mtime
+
+                    if index_mtime < bin_mtime:
+                        print "Index is too old"
+                        os.unlink(index_fname+".dat")
+                        os.unlink(index_fname+".idx")
+                        index_exists = False
+
+                if not index_exists:
+                    print "trying to build on-disk index in %s"%index_fname
+                    tmp_index = Rtree(index_fname,tuples,interleaved=False)
+                    # weird, but we have to delete it to actually force the
+                    # data to be written out
+                    del tmp_index
+
+                # Then open it again for read
+                self.index = Rtree(index_fname,interleaved=False)
             else:
-                self.index = Rtree(interleaved=False)
-                
-        #print "Done"
+                #print "just building Rtree index in memory"
+                self.index = Rtree(tuples,interleaved=False)
+        else:
+            self.index = Rtree(interleaved=False)
 
     def index_fname(self):
         """ Returns either the filename to hand off for storing an index
@@ -456,20 +446,17 @@ class XYZField(Field):
         
     def within_r(self,p,r):
         if self.index:
-            if self.index_type == 'stree':
-                subset = self.index.within_ri(p,r)
-            else: # rtree
-                # first query a rectangle
-                rect = array( [p[0]-r,p[0]+r,p[1]-r,p[1]+r] )
-                
-                subset = self.index.intersection( rect )
-                if isinstance(subset, types.GeneratorType):
-                    subset = list(subset)
-                subset = array( subset )
-                
-                if len(subset) > 0:
-                    dsqr = ((self.X[subset]-p)**2).sum(axis=1)
-                    subset = subset[ dsqr<=r**2 ]
+            # first query a rectangle
+            rect = array( [p[0]-r,p[0]+r,p[1]-r,p[1]+r] )
+
+            subset = self.index.intersection( rect )
+            if isinstance(subset, types.GeneratorType):
+                subset = list(subset)
+            subset = array( subset )
+
+            if len(subset) > 0:
+                dsqr = ((self.X[subset]-p)**2).sum(axis=1)
+                subset = subset[ dsqr<=r**2 ]
 
             return subset
         else:
@@ -531,21 +518,15 @@ class XYZField(Field):
         # print "  Field::nearest(p=%s,count=%d)"%(p,count)
         
         if self.index:
-            if self.index_type=='stree':
-                if count == 1:
-                    return self.index.closest(p)
-                else:
-                    return self.index.n_closest(p,count)
-            else:  # rtree
-                hits = self.index.nearest( p[xxyy], count )
-                # deal with API change in RTree
-                if isinstance( hits, types.GeneratorType):
-                    hits = [hits.next() for i in range(count)]
+            hits = self.index.nearest( p[xxyy], count )
+            # deal with API change in RTree
+            if isinstance( hits, types.GeneratorType):
+                hits = [hits.next() for i in range(count)]
 
-                if count == 1:
-                    return hits[0]
-                else:
-                    return array(hits)
+            if count == 1:
+                return hits[0]
+            else:
+                return array(hits)
         else:
             # straight up, it takes 50ms per query for a small
             # number of points
@@ -700,6 +681,7 @@ class XYZField(Field):
                 chooser[i] = prep_poly.contains( geometry.Point(self.X[i]) )
         else:
             # this only works with the stree implementation.
+            # but stree is no longer supported... FIX
             chooser = self.index.inside_polygon(poly)
             
         if len(chooser) == 0:
@@ -849,14 +831,11 @@ class XYZField(Field):
         self.X[i] = pnt
         
         if self.index:
-            if self.index_type == 'stree':
-                self.index = None
-            else:
-                old_coords = self.X[i,xxyy]
-                new_coords = pnt[xxyy]
+            old_coords = self.X[i,xxyy]
+            new_coords = pnt[xxyy]
 
-                self.index.delete(i, old_coords )
-                self.index.insert(i, new_coords )
+            self.index.delete(i, old_coords )
+            self.index.insert(i, new_coords )
         self.updated_point(i)
 
     def add_point(self,pnt,value):
@@ -873,24 +852,16 @@ class XYZField(Field):
         self._lin_interper = None
         
         if self.index is not None:
-            if self.index_type == 'stree':
-                print "Stree doesn't know how to add points"
-                self.index = None
-            else:
-                print "Adding new point %d to index at "%i,self.X[i]
-                self.index.insert(i, self.X[i,xxyy] )
+            print "Adding new point %d to index at "%i,self.X[i]
+            self.index.insert(i, self.X[i,xxyy] )
 
         self.created_point(i)
         return i
 
     def delete_point(self,i):
         if self.index is not None:
-            if self.index_type == 'stree':
-                print "Stree doesn't know how to delete point"
-                self.index = None
-            else:
-                coords = self.X[i,xxyy]
-                self.index.delete(i, coords )
+            coords = self.X[i,xxyy]
+            self.index.delete(i, coords )
             
         self.X[i,0] = nan
         self.F[i] = nan
