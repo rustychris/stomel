@@ -16,7 +16,8 @@ import shapely.wkb
 import matplotlib
 import wkb2shp
 
-matplotlib.use('Cairo')
+# Cairo doesn't play well with some conda installations.
+matplotlib.use('agg')
 import pylab 
 import numpy as np
 import plot_wkb
