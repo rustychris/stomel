@@ -38,6 +38,15 @@ from geom_types import ogr2text
 class FileNotFound(Exception):
     pass
 
+class ExitException(Exception):
+    """ raised to signal the command line 
+    app to exit
+    """
+    def __init__(self,val):
+        super(ExitException,self).__init__(val)
+        self.val=val
+def exit(val):
+    raise ExitException(val)
 
 class Tom(object):
     scale_shps = None
@@ -233,10 +242,10 @@ class Tom(object):
             starting_step = self.p.step
             self.create_grid()
 
-            if (not os.path.exists('final.pdf')) or self.p.step > starting_step:
-                self.plot_intermediate(fn='final.pdf')
             if (not os.path.exists('final.pav')) or self.p.step > starting_step:
                 self.p.write_complete('final.pav')
+            if (not os.path.exists('final.pdf')) or self.p.step > starting_step:
+                self.plot_intermediate(fn='final.pdf',color_by_step=False)
 
             # write grid as shapefile
             if self.output_shp:
@@ -394,43 +403,18 @@ class Tom(object):
             density = self.scale_factor * density
         return {'density':density}
 
-    def plot_intermediate(self,fn=None):
+    def plot_intermediate(self,fn=None,color_by_step=True):
         fig = pylab.figure(figsize=(100,100))
         ax = pylab.axes( [0,0,1,1] )
 
         # In larger domains, this tends to become blocky when written out to PDF
         # (maybe some sort of level-of-detail thing?)
         # better to skip it - we still have the boundary plotted below
-        if 0 and (self.original_boundary_geo and len(self.original_boundary_geo)>0):
-            # Also want to plot the original shoreline data
-            lines = []
 
-            for g in self.original_boundary_geo:
-                if g.type == 'LineString':
-                    lines.append( np.array(g.coords).copy() )
-                elif g.type == 'Polygon' or g.type == 'MultiPolygon':
-                    if g.type == 'Polygon':
-                        polys = [g]
-                    else:
-                        polys = g.geoms
-                        
-                    for p in polys:
-                        lines.append( np.array(p.exterior.coords) )
-                        for l in p.interiors:
-                            lines.append( np.array(l.coords) )
-                    
-            if 0 and len(lines) > 0:
-                edges = []
-                for l in lines:
-                    for i in range(len(l)-1):
-                        edges.append( l[i:i+2] )
-                edges = np.array(edges)
-                coll = collections.LineCollection( edges )
-                coll.set_color('gray')
-                pylab.gca().add_collection(coll)
-
-        # self.p.plot_boundary() # plots the smoothed boundary
-        self.p.plot() # plots edges, colored by age
+        coll=self.p.plot() # plots edges, colored by age
+        if not color_by_step:
+            coll.set_array(None)
+            coll.set_edgecolor('k')
 
         pylab.axis('equal')
         if fn is None:
@@ -495,4 +479,7 @@ class Tom(object):
 #tom.run(['interactive','-s','scale.shp','-b','grid-boundaries.shp','-n'])
 
 if __name__ == '__main__':
-    Tom().run(sys.argv)
+    try:
+        Tom().run(sys.argv)
+    except ExitException as exc:
+        sys.exit(exc.value)

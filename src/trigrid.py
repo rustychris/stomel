@@ -23,6 +23,7 @@ except ImportError:
 import priority_queue as pq
 import code
 import os,types
+from collections import Iterable
 
 try:
     try:
@@ -713,6 +714,17 @@ class TriGrid(object):
 
         return A
 
+    def angles(self):
+        """ returns [Nc,3] array of internal angles, in radians
+        """ 
+        triples=np.array( [[0,1,2],[1,2,0],[2,0,1] ] )
+        all_triples=p.points[p.cells[:,triples]]
+        delta=np.diff(all_triples,axis=2)
+        abs_angles=np.arctan2(delta[...,1],delta[...,0])
+        rel_angles=(abs_angles[...,1] - abs_angles[...,0])
+        int_angles= np.pi - (rel_angles%(2*np.pi))
+        return int_angles
+            
     def read_sms(self,fname):
         self.fname = fname
         self.read_from = "SMS"
@@ -1028,6 +1040,7 @@ class TriGrid(object):
             # the collections themselves do not automatically set the
             # bounds of the axis
             ax.axis(self.bounds())
+        return line_coll
 
     def plot_scalar(self,scalar,pdata=None,clip=None,ax=None,norm=None,cmap=None):
         """ Plot the scalar assuming it sits at the center of the
@@ -1366,6 +1379,34 @@ class TriGrid(object):
         # Take care of starting edge
         if mode == 'edges' and depths[start] < threshold:
             depths[start] = threshold
+
+    def write_mat(self,fn,order='ccw'):
+        from scipy.io import savemat
+
+        if order is 'ccw':
+            cslice=slice(None)
+        elif order is 'cw':
+            cslice=slice(None,None,-1)
+        else:
+            raise Exception("Bad order: %s"%order)
+
+        d={}
+
+        d['points'] = self.points
+        # to 1-based
+        d['cells'] = 1+self.cells[:,cslice]
+        d['edges'] = 1+self.edges[:,:2]
+        d['edge_to_cells'] = 1+self.edges[:,3:5]
+        d['edge_mark']=self.edges[:,2]
+        d['cell_circumcenters']=self.vcenters()
+        d['readme']="\n".join(["points: [Npoints,2] node locations",
+                               "cells: [Ncells,3] - one-based index into points, CCW order",
+                               "edges: [Nedges,2] - one-based nodes for each edge",
+                               "edge_to_cells: [Nedges,2] - left/right cell index for each edge.",
+                               "   right_cell=-1 if on the border",
+                               "edge_mark: [Nedges] - 0 for internal edge, 1 for boundary",
+                               "cell_circumcenters: [Ncells,2] x/y location of circumcenter (i.e. Delaunay center)"])
+        savemat(fn,d)
         
     def write_suntans(self,pathname):
         """ create cells.dat, edges.dat and points.dat
@@ -1600,6 +1641,14 @@ class TriGrid(object):
             nc1_weight = nc1_weight[:,newaxis]
 
         return nc1_weight * F[nc1] + (1-nc1_weight) * F[nc2]
+
+    def interp_cell_to_node(self,F):
+        vals=zeros(self.Npoints(),'f8')
+
+        for i in range(self.Npoints()):
+            cells=list(self.pnt2cells(i))
+            vals[i]=F[cells].mean()
+        return vals
 
     def cell_divergence_of_edge_flux(self,edge_flux):
         """ edge_flux is assumed to be depth integrated, but not
@@ -2139,21 +2188,38 @@ class TriGrid(object):
     
     def split_edge(self,nodeA,nodeB,nodeC):
         """ take the existing edge AC and insert node B in the middle of it
+
+        nodeA: index to node on one end of the existing edge
+        nodeB: (i) index to new new node in middle of edge,
+               (ii) tuple (coords, dict for add_node options)
+               may be extended to allow arbitrary options for point
+        nodeC: index to node on other end of existing edge
         """
         e1 = self.find_edge([nodeA,nodeC])
+
+        if isinstance(nodeB,tuple):
+            pntB,pntBopts=nodeB
+            nodeB=None
+        else:
+            pntB=self.points[nodeB]
                 
         if any( self.edges[e1,3:5] >= 0 ):
-            print "While trying to split the edge %d (%d-%d) with node %d"%(e1,nodeA,nodeC,nodeB)
-            [annotate(str(i),self.points[i]) for i in [nodeA,nodeC,nodeB]]
+            print "While trying to split the edge %d (%d-%d) with node %s"%(e1,nodeA,nodeC,nodeB)
+            annotate(str(nodeA),self.points[nodeA])
+            annotate(str(nodeB),pntB)
+            annotate(str(nodeC),self.points[nodeC])
             print "The cell neighbors of the edge are:",self.edges[e1,3:5]
-            
             raise Exception,"You can't split an edge that already has cells"
 
-        # Push the specific operations instead of an aggregate split_edge op
-        # self.push_op(self.unsplit_edge,e1,len(self.edges))
         # 2011-01-29: this used to be in the opp. order - but that implies
         #   an invalid state
         self.push_op(self.unmodify_edge,e1,self.edges[e1].copy())
+
+        # 2014-11-06: for a nodeB colinear with nodeA-nodeC, this is the
+        #   more appropriate time to create nodeB
+        if nodeB is None:
+            nodeB=self.add_node(pntB,**pntBopts)
+
         self.push_op(self.unadd_edge,self.Nedges())
         
         self.edges = array_append( self.edges, self.edges[e1] )
@@ -2218,7 +2284,7 @@ class TriGrid(object):
 
         try:
             e = self.find_edge([nodeA,nodeB])
-            raise Exception,"edge betwen %d and %d already exists"%(nodeA,nodeB)
+            raise Exception,"edge between %d and %d already exists"%(nodeA,nodeB)
         except NoSuchEdgeError:
             pass
 
@@ -2685,6 +2751,7 @@ class TriGrid(object):
         return outer_polys
 
     def select_edges_by_polygon(self,poly):
+        ecs=self.edge_centers()
         return nonzero( [poly.contains( geometry.Point(ec)) for ec in ecs] )[0]
 
     def trim_to_left(self, path):

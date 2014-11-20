@@ -1,14 +1,16 @@
 # Maintain a live constrained delaunay triangulation of the grid.
 # designed as a mixin
 
-class MissingConstraint(Exception):
-    pass
-
+import traceback
 import sys
 import pdb
 import orthomaker,trigrid
-
+from collections import Iterable
 import numpy as np
+
+
+class MissingConstraint(Exception):
+    pass
 
 def distance_left_of_line(pnt, qp1, qp2):
     # return the signed distance for where pnt is located left of
@@ -101,6 +103,7 @@ try:
             """ Initialize a triangulation with all current edges and nodes.
             """
             print "populate_dt: top"
+
             self.DT = Constrained_Delaunay_triangulation_2()
             self.vh = np.zeros( (self.Npoints(),) ,'object')
             # sometimes CGAL creates vertices automatically, which are detected by
@@ -175,7 +178,7 @@ try:
                     
                 held_nodes = self.holding_nodes.keys()
                 
-                # Remove all of the nodes that were alive when we were started
+                # Remove all of the nodes that were alive when we started
                 # the hold:
                 for n in held_nodes:
                     if self.vh[n] is not 0: # used to != 0
@@ -767,11 +770,14 @@ try:
         # def unsplit_edge(...): # not supported by trigrid
         
         def split_edge(self,nodeA,nodeB,nodeC):
+            """ per trigrid updates, nodeB may be a node index or a tuple (coords, **add_node_opts)
+            """
             if self.freeze:
                 pass
             elif self.holding:
                 self.holding_nodes[nodeA] = 'split_edge'
-                self.holding_nodes[nodeB] = 'split_edge'
+                if not isinstance(nodeB,Iterable):
+                    self.holding_nodes[nodeB] = 'split_edge'
                 self.holding_nodes[nodeC] = 'split_edge'
             else:
                 if self.verbose > 2:
@@ -780,10 +786,14 @@ try:
                 try:
                     self.dt_remove_edge(e1)
                 except MissingConstraint:
-                    print "    got a missing constraint on split edge, but maybe the edge has already been split"
-                    self.dt_remove_edge(e1,[nodeA,nodeB])
-                    self.dt_remove_edge(e1,[nodeB,nodeC])
-                    print "    Excellent.  The middle node had become part of the constraint"
+                    if isinstance(nodeB,Iterable):
+                        print "    got a missing constraint on split edge, and node has not been created!"
+                        raise
+                    else:
+                        print "    got a missing constraint on split edge, but maybe the edge has already been split"
+                        self.dt_remove_edge(e1,[nodeA,nodeB])
+                        self.dt_remove_edge(e1,[nodeB,nodeC])
+                        print "    Excellent.  The middle node had become part of the constraint"
 
             e2 = super(LiveDtGrid,self).split_edge(nodeA,nodeB,nodeC)
 

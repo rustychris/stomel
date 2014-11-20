@@ -1,14 +1,13 @@
 # Combine the constrained delaunay algorithm from CGAL with the interpolation methods
 # available in scikit.delaunay.
 
-
-# First - can we manually set the fields in a delaunay object?
-from matplotlib import delaunay
-from matplotlib.collections import LineCollection
+# from matplotlib import delaunay # deprecated
 from safe_pylab import *
 from numpy import *
 import plot_utils
 from trigrid import circumcenter
+from matplotlib import tri 
+from matplotlib.collections import LineCollection
 
 try:
     from CGAL.CGAL_Triangulation_2 import Constrained_Delaunay_triangulation_2
@@ -161,6 +160,111 @@ class ConstrainedXYZField(field.XYZField):
         
 
     # And overload how the triangulation is computed
+    def build_cgal_cdt(self):
+        """
+        Builds the constrained delaunay triangulation in CGAL
+        """
+        # Now find the real triangulation using CGAL
+        print "Building constrained Delaunay triangulation"
+        DT = Constrained_Delaunay_triangulation_2()
+        self.DT = DT
+
+        #dtri.x = self.X[:,0]
+        #dtri.y = self.X[:,1]
+
+        vh = np.zeros( (len(self.X),) ,'object')
+        self.vh_info = {}
+
+        print "Adding points"
+        for n,xy in enumerate(self.X): #range(len(dtri.x)):
+            pnt = Point_2(xy[0],xy[1]) # dtri.x[n], dtri.y[n] 
+            vh[n] = DT.insert( pnt )
+            self.vh_info[vh[n]] = n
+
+        print "Adding constraints"
+        for a,b in self.edges:
+            DT.insert_constraint( vh[a], vh[b] )
+
+        # Now populate tri with the triangulation that's in DT
+        if cgal_bindings == 'old':
+            self.DT_Nedges = len(DT.edges)
+            self.DT_Nfaces = len(DT.faces)
+        else:
+            # New bindings don't explicitly expose number_of_edges because
+            # it's actually part of the triangulation datastructure.
+            # naive approach:
+            self.DT_Nedges = 0
+            for e in DT.finite_edges():
+                self.DT_Nedges += 1
+            self.DT_Nfaces = DT.number_of_faces()
+
+    def cdt_topology(self):
+        """ convert the CGAL datastructure to an array-based
+        topology ready for use by matplotlib, numpy
+        """
+        edge_db = zeros( (self.DT_Nedges,2), int32)
+        triangle_nodes = zeros( (self.DT_Nfaces,3), int32)
+        triangle_neighbors = zeros( (self.DT_Nfaces,3), int32) 
+
+        ab_to_faces = collections.defaultdict(list)
+        DT=self.DT
+        def face_iter():
+            if cgal_bindings == 'old':
+                return DT.faces
+            else:
+                return DT.finite_faces()
+
+        num_intersections = 0
+        for i,f in enumerate(face_iter()):
+            for k in [0,1,2]:
+                if f.vertex(k) not in self.vh_info:
+                    num_intersections += 1
+                    print "Bad intersection at %s"%(f.vertex(k).point())
+                else:
+                    triangle_nodes[i,k] = self.vh_info[ f.vertex(k) ]
+
+            # add items so we can look up faces later
+            for a,b in [(0,1),(1,2),(2,0)]:
+                aa = triangle_nodes[i,a]
+                bb = triangle_nodes[i,b]
+                if aa > bb:
+                    aa,bb = bb,aa
+                ab_to_faces[ (aa,bb) ].append(i)
+        if num_intersections:
+            raise Exception("There were self-intersections")
+
+        # Second pass to get triangle neighbors:
+        for i,f in enumerate(face_iter()):
+            for a,b in [(0,1),(1,2),(2,0)]:
+                j = (a+2)%3 # this is edge j, opposite node j, 
+                if triangle_nodes[i,a] > triangle_nodes[i,b]:
+                    a,b = b,a
+                me_and_them = ab_to_faces[ (triangle_nodes[i,a],triangle_nodes[i,b]) ]
+
+                if len(me_and_them) == 1:
+                    triangle_neighbors[i,j] = -1
+                elif me_and_them[0] == i:
+                    triangle_neighbors[i,j] = me_and_them[1]
+                else:
+                    triangle_neighbors[i,j] = me_and_them[0]
+
+        def edge_iter():
+            if cgal_bindings == 'old':
+                return DT.edges
+            else:
+                return DT.finite_edges()
+
+        for j,edge in enumerate(edge_iter()):
+            if cgal_bindings == 'old':
+                f = edge.face()
+                vert = edge.vertex()
+            else:
+                f,vert = edge
+            v1 = f.vertex((vert+1)%3)
+            v2 = f.vertex((vert-1)%3)
+            edge_db[j] = [self.vh_info[v1],self.vh_info[v2]]
+        return edge_db, triangle_nodes, triangle_neighbors
+
     force_cgal = 1
     vh_info = None
     def tri(self):
@@ -168,128 +272,38 @@ class ConstrainedXYZField(field.XYZField):
             return field.XYZField.tri(self)
         
         if self._tri is None:
-            self.vh_info = {}
-            
-            # just give it some dummy input - it may fail on degenerate inputs
-            dummy_x = array([0,0,1],float64)
-            dummy_y = array([0,1,1],float64)
-            tri = delaunay.Triangulation(dummy_x,dummy_y)
-            
-            tri.x = self.X[:,0]
-            tri.y = self.X[:,1]
-            tri.old_shape = tri.x.shape
-            
-            # Now find the real triangulation using CGAL
-            print "Building constrained Delaunay triangulation"
-            DT = Constrained_Delaunay_triangulation_2()
-            self.DT = DT
-            vh = np.zeros( (len(tri.x),) ,'object')
 
-            print "Adding points"
-            for n in range(len(tri.x)):
-                pnt = Point_2( tri.x[n], tri.y[n] )
-                vh[n] = DT.insert( pnt )
-                self.vh_info[vh[n]] = n
+            self.build_cgal_cdt()
+            DT=self.DT
 
-            print "Adding constraints"
-            # Insert edge constraints
-            for a,b in self.edges:
-                DT.insert_constraint( vh[a], vh[b] )
+            edge_db,triangle_nodes,triangle_neighbors=self.cdt_topology()
+            # points = concatenate( (dtri.x[:,newaxis],dtri.y[:,newaxis] ),axis=1 )
 
-            print "Copying constrained triangulation back to interpolator"
-            
-            # Now populate tri with the triangulation that's in DT
-            if cgal_bindings == 'old':
-                Nedges = len(DT.edges)
-                Nfaces = len(DT.faces)
-            else:
-                # New bindings don't explicitly expose number_of_edges because
-                # it's actually part of the triangulation datastructure.
-                # naive approach:
-                Nedges = 0
-                for e in DT.finite_edges():
-                    Nedges += 1
-                Nfaces = DT.number_of_faces()
-            
-            edge_db = zeros( (Nedges,2), int32)
-            triangle_nodes = zeros( (Nfaces,3), int32)
-            triangle_neighbors = zeros( (Nfaces,3), int32) 
+            circumcenters = circumcenter( self.X[triangle_nodes[:,0]],
+                                          self.X[triangle_nodes[:,1]],
+                                          self.X[triangle_nodes[:,2]] )
 
-            ab_to_faces = collections.defaultdict(list)
+            if 0: # older code using matplotlib.delaunay, now deprecated
+                # just give it some dummy input - it may fail on degenerate inputs
+                dummy_x = array([0,0,1],float64)
+                dummy_y = array([0,1,1],float64)
+                dtri = delaunay.Triangulation(dummy_x,dummy_y)
+                dtri.x = self.X[:,0]
+                dtri.y = self.X[:,1]
+                dtri.old_shape = tri.x.shape
 
-            def face_iter():
-                if cgal_bindings == 'old':
-                    return DT.faces
-                else:
-                    return DT.finite_faces()
+                dtri.circumcenters = circumcenters
+                dtri.edge_db = edge_db
+                dtri.triangle_nodes = triangle_nodes
+                dtri.triangle_neighbors = triangle_neighbors
 
-            num_intersections = 0
-            for i,f in enumerate(face_iter()):
-                for k in [0,1,2]:
-                    if f.vertex(k) not in self.vh_info:
-                        num_intersections += 1
-                        print "Bad intersection at %s"%(f.vertex(k).point())
-                    else:
-                        triangle_nodes[i,k] = self.vh_info[ f.vertex(k) ]
+                dtri.hull = tri._compute_convex_hull()
+            else:# newer code using matplotlib.tri
+                dtri=tri.Triangulation(x=self.X[:,0],y=self.X[:,1],
+                                       triangles=triangle_nodes)
 
-                # add items so we can look up faces later
-                for a,b in [(0,1),(1,2),(2,0)]:
-                    aa = triangle_nodes[i,a]
-                    bb = triangle_nodes[i,b]
-                    if aa > bb:
-                        aa,bb = bb,aa
-                    ab_to_faces[ (aa,bb) ].append(i)
-            if num_intersections:
-                raise Exception("There were self-intersections")
+            self._tri = dtri
 
-            # Second pass to get triangle neighbors:
-            for i,f in enumerate(face_iter()):
-                for a,b in [(0,1),(1,2),(2,0)]:
-                    j = (a+2)%3 # this is edge j, opposite node j, 
-                    if triangle_nodes[i,a] > triangle_nodes[i,b]:
-                        a,b = b,a
-                    me_and_them = ab_to_faces[ (triangle_nodes[i,a],triangle_nodes[i,b]) ]
-
-                    if len(me_and_them) == 1:
-                        triangle_neighbors[i,j] = -1
-                    elif me_and_them[0] == i:
-                        triangle_neighbors[i,j] = me_and_them[1]
-                    else:
-                        triangle_neighbors[i,j] = me_and_them[0]
-
-            def edge_iter():
-                if cgal_bindings == 'old':
-                    return DT.edges
-                else:
-                    return DT.finite_edges()
-                
-            for j,edge in enumerate(edge_iter()):
-                if cgal_bindings == 'old':
-                    f = edge.face()
-                    vert = edge.vertex()
-                else:
-                    f,vert = edge
-                v1 = f.vertex((vert+1)%3)
-                v2 = f.vertex((vert-1)%3)
-                edge_db[j] = [self.vh_info[v1],self.vh_info[v2]]
-
-            points = concatenate( (tri.x[:,newaxis],tri.y[:,newaxis] ),axis=1 )
-
-            circumcenters = circumcenter( points[triangle_nodes[:,0]],
-                                          points[triangle_nodes[:,1]],
-                                          points[triangle_nodes[:,2]] )
-
-            # triangle neighbors is more work - build up dict of [a,b] => face1,face2
-            tri.circumcenters = circumcenters
-            tri.edge_db = edge_db
-            tri.triangle_nodes = triangle_nodes
-            tri.triangle_neighbors = triangle_neighbors
-
-            tri.hull = tri._compute_convex_hull()
-
-            self._tri = tri
-
-            
         return self._tri
 
     def to_grid(self,*args,**kwargs):

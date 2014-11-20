@@ -20,7 +20,8 @@ from array_append import array_append
 from scipy.interpolate import RectBivariateSpline
 
 try:
-    from matplotlib import delaunay
+    # from matplotlib import delaunay # deprecated
+    from matplotlib import tri
 except ImportError:
     print "delaunay not available."
 
@@ -291,8 +292,8 @@ class XYZField(Field):
     _tri = None
     def tri(self):
         if self._tri is None:
-            self._tri = delaunay.Triangulation(self.X[:,0],
-                                               self.X[:,1])
+            self._tri = tri.Triangulation(self.X[:,0],
+                                          self.X[:,1])
         return self._tri
 
     def plot_tri(self,**kwargs):
@@ -307,7 +308,13 @@ class XYZField(Field):
     _lin_interper = None
     def lin_interper(self):
         if self._lin_interper is None:
-            self._lin_interper = self.tri().linear_interpolator(self.F)
+            if 0:
+                # this works with the deprecated matplotlib.delaunay code
+                self._lin_interper = self.tri().linear_interpolator(self.F)
+            else:
+                lti=tri.LinearTriInterpolator(self.tri(),
+                                              self.F)
+                self._lin_interper = lti
         return self._lin_interper
     
     #_voronoi = None
@@ -336,12 +343,15 @@ class XYZField(Field):
             # print "why aren't you using linear?!"
         elif interpolation=='linear':
             interper = self.lin_interper()
-            for i in range(len(X)):
-                if i>0 and i%10000==0:
-                    print "%d/%d"%(i,len(X))
-                # remember, the slices are y, x
-                vals = interper[X[i,1]:X[i,1]:2j,X[i,0]:X[i,0]:2j]
-                newF[i] = vals[0,0]
+            if 0: # deprecated matplotlib.delaunay interface
+                for i in range(len(X)):
+                    if i>0 and i%10000==0:
+                        print "%d/%d"%(i,len(X))
+                    # remember, the slices are y, x
+                    vals = interper[X[i,1]:X[i,1]:2j,X[i,0]:X[i,0]:2j]
+                    newF[i] = vals[0,0]
+            else:
+                newF[:] = interper(X[:,0],X[:,1])
         #elif interpolation=='delaunay':
         #    if self._voronoi is None:
         #        self._voronoi = self.calc_voronoi()
@@ -609,13 +619,18 @@ class XYZField(Field):
             xmax = xmin + nx*dx
             ymax = ymin + ny*dy
             
-        # hopefully this is more compatibale between versions, also exposes more of what's
+        # hopefully this is more compatible between versions, also exposes more of what's
         # going on
         if interp == 'nn':
             interper = self.nn_interper()
         elif interp=='linear':
             interper = self.lin_interper()
-        griddedF = interper[ymin:ymax:ny*1j,xmin:xmax:nx*1j]
+        if 0:
+            # this worked with matplotlib.delaunay
+            griddedF = interper[ymin:ymax:ny*1j,xmin:xmax:nx*1j]
+        else: # for newer matplotlib
+            X,Y = np.meshgrid(  linspace(xmin,xmax,nx),linspace(ymin,ymax,ny) )
+            griddedF = interper(X,Y)
 
         return SimpleGrid(extents=[xmin,xmax,ymin,ymax],F=griddedF)
 
@@ -943,7 +958,7 @@ try:
         # let it propagate out
         from CGAL.CGAL_Kernel import Point_2
         from CGAL.CGAL_Apollonius_Graph_2 import Apollonius_Graph_2,Site_2
-        print "Has new bindings"
+        # print "Has new bindings"
         cgal_bindings = 'new'
     
     has_apollonius=True
@@ -1103,29 +1118,44 @@ try:
 
             return newF
 
-        def to_grid(self,nx=2000,ny=2000,interp='apollonius',bounds=None):
-            if bounds is not None:
-                if len(bounds) == 2:
-                    extents = [bounds[0],bounds[2],bounds[1],bounds[3]]
-                else:
-                    extents = bounds
-            else:
-                extents = self.bounds()
-
+        #def to_grid(self,nx=2000,ny=2000,interp='apollonius',bounds=None):
+        def to_grid(self,nx=None,ny=None,interp='apollonius',bounds=None,dx=None,dy=None):
             if interp!='apollonius':
                 print "NOTICE: Apollonius graph was asked to_grid using '%s'"%interp
-                return XYZField.to_grid(self,nx,ny,interp)
+                return XYZField.to_grid(self,nx=nx,ny=ny,interp=interp,bounds=bounds,dx=dx,dy=dy)
+
+            #-- copied from XYZField - should abstract this out
+            if bounds is None:
+                xmin,xmax,ymin,ymax = self.bounds()
             else:
-                x = linspace(extents[0],extents[1],nx)
-                y = linspace(extents[2],extents[3],ny)
+                if len(bounds) == 4:
+                    xmin,xmax,ymin,ymax = bounds
+                else:
+                    xmin,ymin = bounds[0]
+                    xmax,ymax = bounds[1]
 
-                griddedF = zeros( (len(y),len(x)), float64 )
+            if dx is not None: # Takes precedence of nx/ny
+                # round xmin/ymin to be an even multiple of dx/dy
+                xmin = xmin - (xmin%dx)
+                ymin = ymin - (ymin%dy)
 
-                for xi in range(len(x)):
-                    for yi in range(len(y)):
-                        griddedF[yi,xi] = self( [x[xi],y[yi]] )
+                nx = int( (xmax-xmin)/dx )
+                ny = int( (ymax-ymin)/dy )
+                xmax = xmin + nx*dx
+                ymax = ymin + ny*dy
+            #-- end copy
 
-                return SimpleGrid(extents,griddedF)
+            extents=[xmin,xmax,ymin,ymax]
+            x = linspace(xmin,xmax,nx)
+            y = linspace(ymin,ymax,ny)
+
+            griddedF = zeros( (len(y),len(x)), float64 )
+
+            for xi in range(len(x)):
+                for yi in range(len(y)):
+                    griddedF[yi,xi] = self( [x[xi],y[yi]] )
+
+            return SimpleGrid(extents,griddedF)
 
         @staticmethod 
         def read_shps(shp_names,value_field='value',r=1.1,redundant_factor=None):

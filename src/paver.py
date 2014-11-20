@@ -4,6 +4,7 @@ from numpy import *
 from safe_pylab import *
 from matplotlib.collections import *
 from matplotlib.patches import Circle
+from collections import Iterable
 
 from shapely import geometry as geo
 from shapely import wkb 
@@ -580,7 +581,7 @@ class Paving(paving_base,OptimizeGridMixin):
     def __init__(self,rings=None,density=None,
                  shp=None,geom=None,min_density=None,
                  initial_node_status=HINT,resample=None,degenerates=[],
-                 label=None,slide_internal_guides = 0,
+                 label=None,slide_internal_guides = 1,
                  **kwargs):
         """ rings:
               a list of Ni*2 arrays where the first is the outermost exterior ring
@@ -654,10 +655,11 @@ class Paving(paving_base,OptimizeGridMixin):
 
         # This is mainly for doctoring up an existing grid -
         # without any extra information, we assume that boundary nodes are RIGID and
-        # everybody else is FREE.
+        # everybody else is FREE.  This can be doctored up afterwards by 
+        # self.infer_original_rings()
         self.degenerate_rings = []
 
-        self.freeze=1            
+        # self.freeze=1            
 
         # self.initialize_boundaries()
         self.poly = "N/A"
@@ -698,10 +700,11 @@ class Paving(paving_base,OptimizeGridMixin):
         #   0: step at which the edge was created
         #   1: original ring to which the edge belongs (only used for degenerate edges right now)
         self.edge_data = zeros( (self.Nedges(),2), int32)
-
-        self.freeze=0
-        self.refresh_metadata()
-
+        
+        # actually, I think this isn't necessary
+        # no topology is changed here, only Paving-specific bookkeeping.
+        # self.freeze=0
+        # self.refresh_metadata()
 
     def initialize_rings(self,rings,degenerates):
         """ cleans up rings, making sure they are in a list, properly ordered,
@@ -1045,6 +1048,28 @@ class Paving(paving_base,OptimizeGridMixin):
                 if insert_iter.nxt.data != insert_iter.prv.data:
                     insert_iter.append( insert_iter.prv.data, metric=0 )
 
+    def infer_original_rings(self,mask=None,new_stat=SLIDE):
+        """
+        Assuming self is a completed grid, build self.rings, self.original_rings,
+        self.oring_normals, and populate node_data with ALPHA,STAT,BETA,ORIG_RING
+        """
+        if mask is None:
+            mask=self.edges[:,4]==-1
+
+        rings_and_holes=self.edges_to_rings_and_holes( mask )[0]
+        ring_nodes=[rings_and_holes[0]] + rings_and_holes[1]
+
+        self.rings=[]
+        for ridx,rnodes in enumerate(ring_nodes):
+            self.rings.append( self.points[rnodes] )
+            for nidx,n in enumerate(rnodes):
+                self.node_data[n,ALPHA]=nidx
+                self.node_data[n,ORIG_RING] = ridx
+                self.node_data[n,STAT]=new_stat
+                self.node_data[n,BETA]=0.0
+
+        self.original_rings = [r.copy() for r in self.rings]
+        self.oring_normals = [compute_ring_normals(r) for r in self.original_rings]
 
     def shp_to_rings(self,shp):
         """ Load rings out of a shapefile.  Only the first feature will be
@@ -1522,6 +1547,8 @@ class Paving(paving_base,OptimizeGridMixin):
     n_history=0
     def plot(self,just_save=0,plot_step=None,dyn_zoom=None,plot_title=None,clip=None,line_collection_args={},
              boundary=False,hold=False):
+        seg_coll=None
+
         if plot_title is None:
             plot_title = "Step %i"%self.step
         else:
@@ -1605,7 +1632,7 @@ class Paving(paving_base,OptimizeGridMixin):
             draw()
             if self.n_history > 0:
                 self.install_click_handler()
-
+        return seg_coll
 
     def unadd_edge(self,old_length):
         super(Paving,self).unadd_edge(old_length)
@@ -1634,6 +1661,9 @@ class Paving(paving_base,OptimizeGridMixin):
         return index
 
     def split_edge(self,nodeA,nodeB,nodeC):
+        """ per updates to trigrid.py and live_dt.py, nodeB may be 
+        an index or an iterable giving coordinates
+        """
         e1 = self.find_edge([nodeA,nodeC])
         
         index = super(Paving,self).split_edge(nodeA,nodeB,nodeC)
@@ -1644,6 +1674,15 @@ class Paving(paving_base,OptimizeGridMixin):
 
         if len(self.edge_data) != self.Nedges():
             raise Exception,"Somehow edge_data and edges are out of sync"
+
+        if isinstance(nodeB,Iterable):
+            pntB=nodeB
+            if self.edges[e1,0] in [nodeA,nodeC]:
+                nodeB=self.edges[e1,1]
+            else:
+                nodeB=self.edges[e1,0]
+        else:
+            pntB=None
 
         # Doctor any unpaved rings that were affected:
         # look for an iter going from a to c, and one from c to a
@@ -1695,7 +1734,8 @@ class Paving(paving_base,OptimizeGridMixin):
                              self.unpaved[i].head.nxt.nxt.data]
                     xy = self.points[nodes]
                     if not trigrid.is_ccw(xy):
-                        print "Triangle is really an unpaved island"
+                        if self.verbose>1:
+                            print "Triangle is really an unpaved island"
                         i+=1
                         continue
                 if self.verbose > 1:
@@ -2414,8 +2454,8 @@ class Paving(paving_base,OptimizeGridMixin):
         cw_angle_bound = cw_ccw_angles[0]
         angle_range = (cw_ccw_angles[1] - cw_ccw_angles[0]) % (2*pi)
 
-        ## This block used to be inside the try:except: block, but I don't think
-        #  there's any reason for that.
+        #-- This block used to be inside the try:except: block, but I don't think
+        #   there's any reason for that.
         start_node = start_elt.data
         ring_i = int( self.node_data[start_node,ORIG_RING] )
 
@@ -2662,10 +2702,6 @@ class Paving(paving_base,OptimizeGridMixin):
                 else:
                     return original_start_elt.prv
             else:
-                # eventually these new nodes can be stat=SLIDE, but at the moment
-                # that appears to be broken.
-                n = self.add_node(new_point,stat=new_node_stat,orig_ring=ring_i,alpha=new_alpha,beta=sliding_beta)
-
                 # Figure out which old edge is going to be split by the new node.
                 if original_direction == 'forward':
                     old_nbr = original_start_elt.nxt.data
@@ -2698,11 +2734,18 @@ class Paving(paving_base,OptimizeGridMixin):
 
                 # e = self.find_edge((start_node,old_nbr))
 
+                # eventually these new nodes can be stat=SLIDE, but at the moment
+                # that appears to be broken.
+                # n = self.add_node(new_point,stat=new_node_stat,orig_ring=ring_i,alpha=new_alpha,beta=sliding_beta)
+                # a new node could upset the live_dt data structure - so pass the info on up the chain
+                # and trigrid will create it for us when it's safe.
+                ninfo=(new_point,dict(stat=new_node_stat,orig_ring=ring_i,alpha=new_alpha,beta=sliding_beta))
+
                 # This probably needs to either take elements, or be smart enough
                 # to look in unpaved[] for element pairs that must be updated.
                 # the latter would be preferable, since it would allow resampling
                 # of shared edges (think degenerate islands)
-                self.split_edge(start_node,n,old_nbr)
+                self.split_edge(start_node,ninfo,old_nbr)
 
                 # split_edge is now smart enough to handle this automatically -
                 if original_direction=='forward':
@@ -3214,7 +3257,7 @@ class Paving(paving_base,OptimizeGridMixin):
         if best_nbr is None and shoot_ray:
             ## Try the ray shooting method
             #  here,knowing that the connection will be made to right_elt, 
-            #  we shooot the ray from right elt, perpendicular to the edge
+            #  we shoot the ray from right elt, perpendicular to the edge
             
             # first get the direction -
             vec = np.array([-vec[1],vec[0]])
@@ -3229,7 +3272,7 @@ class Paving(paving_base,OptimizeGridMixin):
                 print "Ray shooting found a possible non-local wall connector"
                 
                 # have to make sure that the edge we found is a boundary edge that can
-                # be divided or slide.  This means it must be unmeshed, and on the boundary
+                # be divided or slid.  This means it must be unmeshed, and on the boundary
                 # (maybe someday we'd allow to be unmeshed on both sides)
                 if (self.edges[e,3] == trigrid.UNMESHED) and (self.edges[e,4] == trigrid.BOUNDARY):
                     # for now, ignore whether the nodes are free or not.
@@ -3247,10 +3290,11 @@ class Paving(paving_base,OptimizeGridMixin):
                     # point, take that point even if it didn't pass the locality test above.
                     nbrs = [right_elt.nxt.data,right_elt.prv.data]
                     
-                    if (da / local_scale < 0.1) and (self.edges[e,0] not in nbrs):
+                    close_fac=0.1 # could consider increasing this
+                    if (da / local_scale < close_fac) and (self.edges[e,0] not in nbrs):
                         print "ray found an existing node %d"%self.edges[e,0]
                         return self.edges[e,0]
-                    if (db / local_scale < 0.1) and (self.edges[e,1] not in nbrs):
+                    if (db / local_scale < close_fac) and (self.edges[e,1] not in nbrs):
                         print "ray found an existing node %d"%self.edges[e,1]
                         return self.edges[e,1]
 
@@ -3331,6 +3375,9 @@ class Paving(paving_base,OptimizeGridMixin):
                 # 1.15 was too short in some situations. It's not clear
                 #  that going just from local_scale is right.
                 if dist > best_dist or dist > 1.25*local_scale:
+                    if self.verbose>1:
+                        print "Discarding nonlocal because relative distance is %.3f, best is %.3f"%(dist/local_scale,
+                                                                                                     best_dist/local_scale)
                     continue
 
                 best_dist = dist
@@ -3364,7 +3411,6 @@ class Paving(paving_base,OptimizeGridMixin):
                 
                 # have to make sure that the edge we found is a boundary edge that can
                 # be divided or slide.  This means it must be unmeshed, and on the boundary
-                # (maybe someday we'd allow to be unmeshed on both sides)
                 valid_external = (self.edges[e,3] == trigrid.UNMESHED) and (self.edges[e,4] == trigrid.BOUNDARY)
                 valid_internal = (self.edges[e,3] == trigrid.UNMESHED) and (self.edges[e,4] == trigrid.UNMESHED) \
                                  and (self.edge_data[e,1] >= 0)
@@ -3384,11 +3430,12 @@ class Paving(paving_base,OptimizeGridMixin):
                     # so if the point that we hit is within 10% of the local scale of an existing
                     # point, take that point even if it didn't pass the locality test above.
                     nbrs = [center_elt.nxt.data,center_elt.prv.data]
-                    
-                    if (da / local_scale < 0.1) and (self.edges[e,0] not in nbrs):
+                    close_fac=0.1 # larger??
+
+                    if (da / local_scale < close_fac) and (self.edges[e,0] not in nbrs):
                         print "ray found an existing node %d"%self.edges[e,0]
                         return self.edges[e,0]
-                    if (db / local_scale < 0.1) and (self.edges[e,1] not in nbrs):
+                    if (db / local_scale < close_fac) and (self.edges[e,1] not in nbrs):
                         print "ray found an existing node %d"%self.edges[e,1]
                         return self.edges[e,1]
 
@@ -3583,6 +3630,12 @@ class Paving(paving_base,OptimizeGridMixin):
                         print "Will make sure that bisect_nonlocal is tried next"
                         strategies.insert(0,'bisect_nonlocal')
                         raise StrategyFailed,'Cutoff intersected existing edges'
+                    # if stubs are removed, need to use the new center_elt
+                    # in order to get the right topology
+                    # hopefully it's not problematic to be changing this in the middle
+                    # of fill()
+                    center_elt_mod=self.prepare_cutoff_stubs(center_elt)
+                    unpaved_mod=center_elt_mod.clist
                     
                     tmp_edge = self.add_edge( ordered[0], ordered[2])
                     self.updated_cells += self.cells_from_last_new_edge
@@ -3590,11 +3643,11 @@ class Paving(paving_base,OptimizeGridMixin):
                     # if these edges do work out, this will be the new unpaved:
                     if len(unpaved) == 4:
                         # remove all of them...
-                        new_unpaved = [(unpaved.clear, )]
+                        new_unpaved = [(unpaved_mod.clear, )]
                     else:
-                        new_unpaved = [(unpaved.remove_iters, center_elt),
-                                       (unpaved.update_metric, center_elt.prv, 0.0),
-                                       (unpaved.update_metric, center_elt.nxt, 0.0)]
+                        new_unpaved = [(unpaved_mod.remove_iters, center_elt_mod),
+                                       (unpaved_mod.update_metric, center_elt_mod.prv, 0.0),
+                                       (unpaved_mod.update_metric, center_elt_mod.nxt, 0.0)]
 
                     if self.verbose > 2:
                         print "Did a cutoff, and the update cells are: ",self.updated_cells
@@ -3834,7 +3887,7 @@ class Paving(paving_base,OptimizeGridMixin):
 
                         if len(undeletable) > 0:
                             print "Was trying a join, found nodes that needed to be cleared out"
-                            print elts_to_delete
+                            print ", ".join([str(e) for e in elts_to_delete])
                             print "But some are not valid for deletion: "
                             print undeletable
                             raise StrategyFailed,"Couldn't clear nodes for a safe join"
@@ -4069,7 +4122,12 @@ class Paving(paving_base,OptimizeGridMixin):
                                 # updated self.unpaved, so things are not entirely consistent
                                 cp = self.checkpoint()
                                 # the 200.0 here is just a guess....
-                                self.safe_relax_one(n,use_beta=use_beta,max_cost=min(cost,200.0) )
+                                # this used give max_cost=min(cost,200.0)
+                                # but in some bad situations that disallows intermediate
+                                # bad-but-less-bad situations.
+                                # what's the problem with just saying that it has to improve
+                                # the cost?
+                                self.safe_relax_one(n,use_beta=use_beta,max_cost=cost) # min(cost,200.0) )
 
                                 if post_relax_check is not None and not post_relax_check():
                                     print "Post-relax check failed.  Reverting the relaxation"
@@ -4213,6 +4271,53 @@ class Paving(paving_base,OptimizeGridMixin):
             for n in modified_nodes:
                 self.check_nonlocal_connection(n)
         # print "End of post_fill"
+
+
+    def prepare_cutoff_stubs(self,elt):
+        """ In the presence of degenerate edges, it's possible to shoot for a cutoff,
+        but wind up with a stub poking into the resulting cell.  This function
+        will check for and remove those stubs, ahead of fill() trying to make the cutoff
+        returns an updated iter to replace elt
+        """
+        a=elt.prv.data
+        b=elt.data
+        c=elt.nxt.data
+
+        tri=geo.Polygon(self.points[ [a,b,c] ])
+        def n_inside(n):
+            return tri.contains( geo.Point(self.points[n,0],self.points[n,1]) )
+
+        pairs_to_del=[] # node index pairs, with the first being the expendable one
+
+        if self.node_data[a][1] in self.degenerate_rings:
+            trav=elt.prv.prv
+            while trav.data!=a and n_inside(trav.data):
+                pairs_to_del.append([trav.data,trav.nxt.data])
+                if trav.nxt.data==trav.prv.data:
+                    break
+                trav=trav.prv
+
+        if self.node_data[c][1] in self.degenerate_rings:
+            trav=elt.nxt.nxt
+            while trav.data!=c and n_inside(trav.data):
+                pairs_to_del.append([trav.data,trav.prv.data])
+                if trav.nxt.data==trav.prv.data:
+                    break
+                trav=trav.nxt
+        
+        for n1,n2 in pairs_to_del[::-1]:
+            print " Deleting stub edges inside cutoff [%d-%d]"%(n1,n2)
+            j=self.find_edge([n1,n2])
+            self.delete_edge(j,handle_unpaved=1)
+            self.delete_node(n1)
+        if len(pairs_to_del):
+            # have to get an updated elt
+            for elt in self.all_iters_for_node(b):
+                if elt.prv.data==a:
+                    break
+            else:
+                raise Exception("how did you fall out of that loop?")
+        return elt
 
     def check_nonlocal_connection(self,n):
         if self.verbose > 1:
@@ -4745,8 +4850,9 @@ class Paving(paving_base,OptimizeGridMixin):
                     new_point = self.boundary_slider(ring_i, alpha,starting_beta)
                     return one_point_cost(new_point,edge_points,local_length)
 
+                # 2014-11-06: used to omit the [0], maintaining an array value
                 new_nd_alpha =my_fmin(bdry_point_cost_a,1,disp=0,
-                                      xtol=xtol)
+                                      xtol=xtol)[0]
                 new_cost = bdry_point_cost_a(new_nd_alpha)
                 new_alpha = new_nd_alpha - 1 + starting_alpha
                 new_beta = starting_beta
@@ -5042,33 +5148,38 @@ class Paving(paving_base,OptimizeGridMixin):
                 # if the endpoint is alone, we can (maybe?) just kill it?
                 replace = self.closest_point(new_pnt_i)
                 nbrs = self.pnt2nbrs(replace)
-                print "%d is trying to slide on top of the end node %d, with nbrs %s"%(n,replace,nbrs)
-                if nbrs==[n]:
-                    loner_stat = self.node_data[replace,STAT]
-                    # Remove replace from unpaved:
-                    # note that we should get exactly two iters that point to
-                    # replace
-                    for each_elt in self.all_iters_for_node(n):
-                        if each_elt.nxt.data == replace:
-                            break
-                    clist = each_elt.clist
-                    
-                    self.push_op(self.unremove_from_unpaved,each_elt.nxt.nxt)
-                    clist.remove_iters(each_elt.nxt.nxt)
-                    self.push_op(self.unremove_from_unpaved,each_elt.nxt)
-                    clist.remove_iters(each_elt.nxt)
-
-                    
-                    # something is making the index very unhappy -
-                    # try just killing it preemptively:
-                    self.index = None
-                    print "deleting %d"%replace
-                    self.delete_node(replace)
-                    print "done"
-                    self.change_node_stat(n,loner_stat)
+                if n==replace:
+                    # this happens because in rare cases a guide can have its end snipped
+                    # if that end winds up inside a cutoff. 
+                    pass
                 else:
-                    print "Whoa - this is bad - trying to slide a node on top of another node, but we can't"
-                    print "get rid of the other node because it has other neighbors"
+                    print "%d is trying to slide on top of the end node %d, with nbrs %s"%(n,replace,nbrs)
+                    if len(nbrs)==1 and nbrs[0]==n:
+                        loner_stat = self.node_data[replace,STAT]
+                        # Remove replace from unpaved:
+                        # note that we should get exactly two iters that point to
+                        # replace
+                        for each_elt in self.all_iters_for_node(n):
+                            if each_elt.nxt.data == replace:
+                                break
+                        clist = each_elt.clist
+
+                        self.push_op(self.unremove_from_unpaved,each_elt.nxt.nxt)
+                        clist.remove_iters(each_elt.nxt.nxt)
+                        self.push_op(self.unremove_from_unpaved,each_elt.nxt)
+                        clist.remove_iters(each_elt.nxt)
+
+
+                        # something is making the index very unhappy -
+                        # try just killing it preemptively:
+                        self.index = None
+                        print "deleting %d"%replace
+                        self.delete_node(replace)
+                        print "done"
+                        self.change_node_stat(n,loner_stat)
+                    else:
+                        print "Whoa - this is bad - trying to slide a node on top of another node, but we can't"
+                        print "get rid of the other node because it has other neighbors"
                     
         # print "Moving %d to %s"%(n,new_pnt_i)
         self.move_node(n, new_pnt_i )
@@ -5204,6 +5315,8 @@ class Paving(paving_base,OptimizeGridMixin):
         if n_steps is None:
             self.init_stats()
         while 1: 
+            if n_steps and self.step >= n_steps:
+                break
             if not self.choose_and_fill():
                 break
             if plot_stride and self.step%plot_stride == 0:
@@ -5215,8 +5328,6 @@ class Paving(paving_base,OptimizeGridMixin):
                 self.write_complete(fn)
                 print "Done with save"
                 
-            if n_steps and self.step > n_steps:
-                break
 
         if n_steps is None:
             self.finish_stats()
