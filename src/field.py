@@ -1,6 +1,7 @@
 from numpy import *
 import numpy as np # to help in transition
 from safe_pylab import *
+import matplotlib.pyplot as plt # transitioning...
 
 import glob,types
 
@@ -297,8 +298,11 @@ class XYZField(Field):
         return self._tri
 
     def plot_tri(self,**kwargs):
-        import plot_utils
-        plot_utils.plot_tri(self.tri(),**kwargs)
+        if 0: # deprecated matplotlib.delaunay stuff
+            import plot_utils
+            plot_utils.plot_tri(self.tri(),**kwargs)
+        else:
+            return plt.triplot(self.tri(),**kwargs)
     
     _nn_interper = None
     def nn_interper(self):

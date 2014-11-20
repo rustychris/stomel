@@ -454,7 +454,7 @@ def one_point_cost(pnt,edges,target_length=5.0):
         min_len = min(ab_lens.min(),ca_lens.min())
         max_len = max(ab_lens.min(),ca_lens.min())
 
-        undershoot = target_length**2 / min_len
+        undershoot = target_length**2 / max(min_len,1e-10*target_length)
         overshoot  = max_len / target_length**2
 
         length_penalty = 0
