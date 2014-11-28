@@ -1,7 +1,14 @@
 stomel
 ======
 
-Spatial tools for ocean modeling in python
+Spatial tools for ocean modeling in python.   
+
+Example
+=======
+
+Likely the most notable 
+module of stomel is the orthogonal triangular grid generation. A sampling
+of its features can be seen in this [ipython notebook](http://nbviewer.ipython.org/github/rustychris/stomel/blob/master/examples/tom_test.ipynb)
 
 Install
 ======
