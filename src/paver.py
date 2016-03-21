@@ -38,6 +38,50 @@ def my_fmin(f,x0,args=(),xtol=1e-4,disp=0):
     #  in at least one case, this doesn't terminate...
     # return opt.fmin_cg(f,x0,args=args,gtol=xtol,disp=disp)
 
+def remove_small_islands(shore_poly,density):
+    """
+    (moved from smoother.py)
+    Given a shore polygon that includes islands, remove islands which are too 
+    small to be resolved by the given density field.
+    """
+    ext_ring = array(shore_poly.exterior.coords)
+    int_rings = []
+
+    for int_ring in shore_poly.interiors:
+        p = int_ring.convex_hull
+        
+        points = array(p.exterior.coords)
+        center = points.mean(axis=0)
+        scale = density(center)
+
+        # brute force - find the maximal distance between
+        # any two points.  probably a smart way to do this,
+        # but no worries...
+        max_dsqr = 0
+        for i in range(len(points)):
+            pa = points[i]
+            for j in range(i,len(points)):
+                d = ((pa - points[j])**2).sum()
+                max_dsqr = max(d,max_dsqr)
+
+        feature_scale = sqrt( max_dsqr )
+        print "Ring has scale of ",feature_scale
+
+        # maybe overkill, but with feature_scale ~ scale,
+        # that leads to 2 edges for the whole feature, which
+        # gets us into trouble.  Even at 2*scale it is still
+        # possible for stuff to suck, but give it a try...
+
+        # would be nice to be smarter about this, maybe buffer
+        # the ring to 'round up' to a good size, but then we'd
+        # have to check for intersections created by the buffering
+        if feature_scale > 2*scale:
+            int_rings.append(array(int_ring.coords))
+
+    new_poly = geometry.Polygon(ext_ring,int_rings)
+    return new_poly
+
+    
 
 import trigrid
 import orthomaker as om
@@ -400,7 +444,7 @@ def one_point_cost(pnt,edges,target_length=5.0):
     i = arange(3)
     im1 = (i-1)%3
     
-    ## cost based on angle:
+    #-# cost based on angle:
     abs_angles = arctan2( all_edges[:,:,1], all_edges[:,:,0] )
     all_angles = (pi - (abs_angles[:,i] - abs_angles[:,im1]) % (2*pi)) % (2*pi)
         
@@ -446,7 +490,7 @@ def one_point_cost(pnt,edges,target_length=5.0):
     
     penalty += angle_penalty + big_angle_penalty
 
-    ## Length penalties:
+    #-# Length penalties:
     ab_lens = (all_edges[:,0,:]**2).sum(axis=1)
     ca_lens = (all_edges[:,2,:]**2).sum(axis=1)
 
@@ -959,14 +1003,14 @@ class Paving(paving_base,OptimizeGridMixin):
             start_twin,end_twin = end_twin,start_twin
 
 
-        ## Resample only when we're making everything rigid - 
+        #-# Resample only when we're making everything rigid - 
         if not self.slide_internal_guides:
             degen_sampled,degen_alpha = upsample_linearring(degen,self.density,closed_ring=0,return_sources=True)
         else:
             degen_sampled = degen
             degen_alpha = arange(float(len(degen)))
         
-        ## Create an original ring (slider) for this line
+        #-# Create an original ring (slider) for this line
         oring_id = len(self.original_rings)
         self.original_rings.append( degen.copy() )
         # this function probably doesn't really understand non-closed rings...  beware
@@ -974,7 +1018,7 @@ class Paving(paving_base,OptimizeGridMixin):
         self.degenerate_rings.append(oring_id)
 
 
-        ## Add the new nodes, setting them all to RIGID/HINT depending on self.slide_internal_guides
+        #-# Add the new nodes, setting them all to RIGID/HINT depending on self.slide_internal_guides
         i_to_add = arange(len(degen_sampled))
         node_ids = -1*ones( len(degen_sampled), int32)
         
@@ -1028,7 +1072,7 @@ class Paving(paving_base,OptimizeGridMixin):
             insert_iter = insert_iters[0]
             
         for i in range(1,len(node_ids)):
-            ## Maybe not right for the last step...
+            # Maybe not right for the last step...
 
             # note that this edge belongs to this particular original ring
             e = self.add_edge( node_ids[i-1], node_ids[i], oring=oring_id )
@@ -1250,7 +1294,7 @@ class Paving(paving_base,OptimizeGridMixin):
         #if self.verbose > 0:
         print "Removing small islands"
 
-        new_poly3 = smoother.remove_small_islands(new_poly2,self.min_density)
+        new_poly3 = remove_small_islands(new_poly2,self.min_density)
         self.new_poly3 = new_poly3
 
         #if self.verbose > 0:
@@ -1270,22 +1314,23 @@ class Paving(paving_base,OptimizeGridMixin):
         print "Re-initialized."
 
     telescope_rate = 1.1
-    def adjust_density(self):
-        """ Calculate clearances from the shoreline and decrease the requested
-        scale where the clearance is smaller then the scale (or by some factor)
 
-        For now, this can only deal with an XYZField being used for the density.
-        """
-        self.requested_density = self.density
-
-        import smoother
-        if self.verbose>0:
-            print "Adjusting scale based on shoreline"
-            
-        self.density = smoother.adjust_scale(self.poly,self.requested_density,r=self.telescope_rate)
-
-        if self.verbose>0:
-            print "done with adjust_scale"
+    # obsolete - superseded by apollonius graph
+    # def adjust_density(self):
+    #     """ Calculate clearances from the shoreline and decrease the requested
+    #     scale where the clearance is smaller then the scale (or by some factor)
+    # 
+    #     For now, this can only deal with an XYZField being used for the density.
+    #     """
+    #     self.requested_density = self.density
+    # 
+    #     if self.verbose>0:
+    #         print "Adjusting scale based on shoreline"
+    #         
+    #     self.density = smoother.adjust_scale(self.poly,self.requested_density,r=self.telescope_rate)
+    # 
+    #     if self.verbose>0:
+    #         print "done with adjust_scale"
 
     def adjust_density_by_apollonius(self):
         """
@@ -1293,7 +1338,6 @@ class Paving(paving_base,OptimizeGridMixin):
         """
         self.requested_density = self.density
 
-        # import smoother
         self.ag_density = self.apollonius_scale(r=self.telescope_rate)
 
         # The realy density is then the lesser of the requested and the telescoped
