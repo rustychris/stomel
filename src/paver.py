@@ -1248,7 +1248,7 @@ class Paving(paving_base,OptimizeGridMixin):
         Note: smoothing does not know how to handle degenerate edges - they will
         be left in, but no check is made that they are inside the smoothed boundaries.
         """
-        import smoother
+        # import smoother
         
         self.old_poly = self.poly
         
